@@ -11,3 +11,6 @@
 [submodule ".agents/skills/integrations/google"]
 	path = .agents/skills/integrations/google
 	url = git@github.com:rodrigogml/skillGoogle.git
+[submodule ".agents/skills/integrations/mysql"]
+	path = .agents/skills/integrations/mysql
+	url = git@github.com:rodrigogml/skillMySQL.git
