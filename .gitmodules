@@ -4,3 +4,6 @@
 [submodule ".agents/skills/todoist"]
 	path = .agents/skills/todoist
 	url = git@github.com:rodrigogml/skillTodoist.git
+[submodule ".agents/skills/notion"]
+	path = .agents/skills/notion
+	url = git@github.com:rodrigogml/skillNotion.git
