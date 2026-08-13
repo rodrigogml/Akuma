@@ -1,9 +1,13 @@
-[submodule ".agents/skills/keePassVault"]
-	path = .agents/skills/keePassVault
+[submodule ".agents/skills/integrations/keePassVault"]
+	path = .agents/skills/integrations/keePassVault
 	url = git@github.com:rodrigogml/skillKeePassVault.git
-[submodule ".agents/skills/todoist"]
-	path = .agents/skills/todoist
+[submodule ".agents/skills/integrations/todoist"]
+	path = .agents/skills/integrations/todoist
 	url = git@github.com:rodrigogml/skillTodoist.git
-[submodule ".agents/skills/notion"]
-	path = .agents/skills/notion
+[submodule ".agents/skills/integrations/notion"]
+	path = .agents/skills/integrations/notion
 	url = git@github.com:rodrigogml/skillNotion.git
+
+[submodule ".agents/skills/integrations/google"]
+	path = .agents/skills/integrations/google
+	url = git@github.com:rodrigogml/skillGoogle.git
