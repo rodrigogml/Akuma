@@ -1,0 +1,3 @@
+[submodule ".agents/skills/keePassVault"]
+	path = .agents/skills/keePassVault
+	url = git@github.com:rodrigogml/skillKeePassVault.git
