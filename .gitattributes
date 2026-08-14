@@ -1,0 +1,4 @@
+*.md  text working-tree-encoding=UTF-8 eol=crlf
+*.ps1 text working-tree-encoding=UTF-8 eol=crlf
+*.psm1 text working-tree-encoding=UTF-8 eol=crlf
+*.psd1 text working-tree-encoding=UTF-8 eol=crlf

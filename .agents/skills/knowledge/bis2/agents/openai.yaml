@@ -1,0 +1,4 @@
+interface:
+  display_name: "Todoist"
+  short_description: "Operate Todoist through secure API profiles"
+  default_prompt: "Use the Todoist API skill with the selected profile to inspect or modify Todoist data."
