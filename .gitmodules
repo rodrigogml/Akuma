@@ -17,3 +17,6 @@
 [submodule ".agents/skills/integrations/bis2cmd"]
 	path = .agents/skills/integrations/bis2cmd
 	url = git@github.com:rodrigogml/skillBIS2CMD.git
+[submodule ".agents/skills/integrations/ssh"]
+	path = .agents/skills/integrations/ssh
+	url = git@github.com:rodrigogml/skillSSH.git
