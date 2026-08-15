@@ -1,0 +1,4 @@
+interface:
+  display_name: "Turing Production Server"
+  short_description: "Operate Turing safely in production"
+  default_prompt: "Use $turing to investigate or plan a safe operation on the Turing production server."
