@@ -1,0 +1,7 @@
+{
+  "vault_wrapper": "C:/x/Akuma/.agents/skills/integrations/keePassVault/scripts/keepass_vault.py",
+  "webhook_server": {
+    "host": "127.0.0.1",
+    "port": 0
+  }
+}

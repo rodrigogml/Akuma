@@ -1,0 +1,13 @@
+{
+  "id": "bot-principal",
+  "name": "Bot Principal",
+  "profile": "C:/x/Akuma/configs/telegram_akuma.ini",
+  "listener": {
+    "enabled": false,
+    "mode": "polling",
+    "poll_timeout": 30,
+    "allowed_updates": ["message"]
+  },
+  "reply_text": "Não incomode o Akuma",
+  "owners": []
+}
