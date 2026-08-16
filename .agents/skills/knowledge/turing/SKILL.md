@@ -65,3 +65,17 @@ Acrescente informações específicas em referências separadas por domínio, ma
 - Deploy e rollback: documentar pré-condições, artefatos, janela, validações e recuperação.
 
 Ao receber uma tarefa sobre um domínio ainda não documentado, investigue apenas o necessário para estruturar o conhecimento e não presuma procedimentos de produção.
+
+## Apache e domínios
+
+O Turing utiliza Apache como camada web de produção, com serviço ativo e atendimento nas portas HTTP e HTTPS. A operação é organizada por VirtualHosts habilitados, que associam domínios e subdomínios a aplicações, sites e serviços distintos.
+
+No levantamento realizado em 15/08/2026, foram identificados os seguintes domínios e subdomínios sob gestão do Apache:
+
+- Sites e domínios principais: `assurity.com.br`, `barinela.com.br`, `barinella.com.br`, `biserp.com.br`, `eracers.com.br`, `fotosepegadas.com.br`, `laizagalvan.eng.br`, `laveli.com.br`, `laveliconstrutora.com.br`, `laveli.eng.br`, `laveliengenharia.com.br`, `laveliincorporadora.com.br`, `rinos.com.br`, `rodrigogml.eng.br`, `rogerio.adv.br` e `talori.com.br`.
+- Aplicações e subdomínios: `app.rinos.com.br`, `b10.biserp.com.br`, `bingo.rodrigogml.eng.br`, `bis10.biserp.com.br`, `bis2.biserp.com.br`, `intra.barinella.com.br`, `jarvis.rodrigogml.eng.br`, `mysteryrealms.rodrigogml.eng.br`, `tpanel.rodrigogml.eng.br`, `turing.rodrigogml.eng.br`, `wiki.biserp.com.br` e `wiki.rodrigogml.eng.br`.
+- Aliases públicos `www` foram identificados para parte dos domínios principais e devem ser tratados como aliases dos respectivos sites, não como aplicações independentes.
+
+Componentes relacionados encontrados ativos no levantamento: PHP-FPM 8.4 e MySQL. A relação acima é um índice operacional; não reproduza nesta skill caminhos, diretivas, certificados, regras de proxy ou demais detalhes que devem continuar sendo consultados diretamente no servidor.
+
+Ao investigar o Apache, mantenha a distinção entre VirtualHosts habilitados, arquivos disponíveis e serviços auxiliares. Antes de qualquer alteração, identifique o domínio afetado, a aplicação associada, o impacto esperado e a necessidade de interrupção.
