@@ -20,3 +20,11 @@
 [submodule ".agents/skills/integrations/ssh"]
 	path = .agents/skills/integrations/ssh
 	url = git@github.com:rodrigogml/skillSSH.git
+[submodule ".agents/skills/integrations/cloudflare"]
+	path = .agents/skills/integrations/cloudflare
+	url = git@github.com:rodrigogml/skillCloudflare.git
+	branch = main
+[submodule ".agents/skills/integrations/forward-email"]
+	path = .agents/skills/integrations/forward-email
+	url = git@github.com:rodrigogml/skillForwardEmail.git
+	branch = main
