@@ -1,0 +1,4 @@
+interface:
+  display_name: "Skill Development Standard"
+  short_description: "Apply the Akuma standard for building integration and knowledge skills"
+  default_prompt: "Use the skill development standard to plan, implement, test, and document this skill consistently."

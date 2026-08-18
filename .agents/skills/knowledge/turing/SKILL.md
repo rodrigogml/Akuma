@@ -68,7 +68,22 @@ Ao receber uma tarefa sobre um domínio ainda não documentado, investigue apena
 
 ## Apache e domínios
 
+### Organização dos diretórios dos VirtualHosts
+
+No Turing, os VirtualHosts que servem arquivos usam diretórios próprios sob `/srv/apache/vhosts/<domínio>/<raiz-do-site>`. O caminho `/var/www` não é o padrão efetivo das aplicações existentes. Quando a aplicação reside em outro local, o diretório público do VirtualHost deve ser um link simbólico dentro dessa estrutura, apontando para a versão publicada da aplicação. Para o Ganttist, o caminho estável será `/srv/apache/vhosts/ganttist.rodrigogml.eng.br/www`, apontando para o diretório público da versão ativa em `/opt`.
+
 O Turing utiliza Apache como camada web de produção, com serviço ativo e atendimento nas portas HTTP e HTTPS. A operação é organizada por VirtualHosts habilitados, que associam domínios e subdomínios a aplicações, sites e serviços distintos.
+
+### Regras operacionais dos domínios
+
+- Todo acesso HTTP deve ser redirecionado para HTTPS, preservando o host, o caminho da URL e todos os parâmetros recebidos.
+- Os domínios e subdomínios web utilizam o Cloudflare para gerenciamento DNS, com os registros A, AAAA e CNAME compatíveis mantidos como `Proxied` (proxy habilitado/orange cloud).
+- Registros DNS que não suportam proxy HTTP, como MX e TXT, permanecem fora dessa regra.
+- A conexão pública é intermediada pelo Cloudflare, mas o Apache do Turing deve continuar aceitando HTTPS na origem.
+- O modo SSL/TLS esperado no Cloudflare é `Full`, pois ele mantém HTTPS entre Cloudflare e origem sem validar a autoridade emissora do certificado. Isso permite o uso de certificados self-signed.
+- O modo `Full (strict)` não deve ser usado com esses certificados self-signed, pois exige validação do certificado da origem.
+- Os certificados self-signed utilizados nos domínios seguem validade operacional aproximada de 20 anos e devem ser acompanhados quanto à expiração.
+- Alterações em redirecionamentos, proxy DNS, modo SSL/TLS ou certificados devem identificar previamente os domínios afetados e exigir autorização explícita quando houver risco de indisponibilidade.
 
 No levantamento realizado em 15/08/2026, foram identificados os seguintes domínios e subdomínios sob gestão do Apache:
 
@@ -79,3 +94,14 @@ No levantamento realizado em 15/08/2026, foram identificados os seguintes domín
 Componentes relacionados encontrados ativos no levantamento: PHP-FPM 8.4 e MySQL. A relação acima é um índice operacional; não reproduza nesta skill caminhos, diretivas, certificados, regras de proxy ou demais detalhes que devem continuar sendo consultados diretamente no servidor.
 
 Ao investigar o Apache, mantenha a distinção entre VirtualHosts habilitados, arquivos disponíveis e serviços auxiliares. Antes de qualquer alteração, identifique o domínio afetado, a aplicação associada, o impacto esperado e a necessidade de interrupção.
+
+## Sistemas BIS2 e BIS10
+
+O BIS2 e o BIS10 são aplicações corporativas Spring + Vaadin executadas em instâncias WildFly independentes instaladas sob `/opt`. Cada aplicação possui seu próprio serviço do sistema operacional e não depende do serviço WildFly genérico.
+
+- `bis2.biserp.com.br` publica o BIS2.
+- `bis10.biserp.com.br` e o alias `b10.biserp.com.br` publicam o BIS10.
+
+O Apache atua como camada pública HTTPS e proxy reverso, encaminhando as requisições dos subdomínios para a instância WildFly correspondente. O WildFly fornece o ambiente de execução das aplicações, enquanto os serviços específicos BIS2 e BIS10 controlam sua inicialização e supervisão no sistema operacional.
+
+Esta seção é um índice operacional. Para investigar deploys, portas, artefatos, logs ou configurações, consulte diretamente o Turing e não replique esses detalhes nesta skill.
