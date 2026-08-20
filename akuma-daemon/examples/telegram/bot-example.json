@@ -9,5 +9,10 @@
     "allowed_updates": ["message"]
   },
   "reply_text": "Não incomode o Akuma",
+  "totp": {
+    "enabled": false,
+    "profile": "C:/x/Akuma/configs/telegram_akuma.ini",
+    "period_seconds": 30
+  },
   "owners": []
 }

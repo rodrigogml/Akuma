@@ -56,6 +56,22 @@ py -3 -m akuma_daemon telegram send bot-principal -100123456789 "Mensagem no tó
 
 O listener responde inicialmente a qualquer mensagem com `Não incomode o Akuma`. O comando `/pair 123456` (também aceito como `/painr` por compatibilidade) consome o PIN único emitido por `pair-request` e registra o remetente como owner do bot.
 
+### TOTP efêmero
+
+Com `totp.enabled` ativo no JSON do bot, somente um owner em conversa privada pode usar `/totp [filtro]`. O bot pede a senha, apaga a mensagem recebida e compara os valores dos caminhos `real_password_entry` e `fake_password_entry` da seção `[totp]` do perfil. A senha falsa responde que não há TOTPs; uma senha inválida é recusada; a senha real exibe entradas TOTP paginadas. O filtro não diferencia maiúsculas/minúsculas e `*` representa qualquer sequência no caminho da entrada.
+
+O perfil reutiliza a seção `[vault]` existente e acrescenta:
+
+```ini
+[totp]
+real_password_entry = Akuma/Telegram/TOTP real
+fake_password_entry = Akuma/Telegram/TOTP falso
+```
+
+As mensagens do fluxo — solicitação, lista, avisos e código — são apagadas automaticamente. O código é enviado sozinho, sem proteção de conteúdo, para facilitar a cópia; a mensagem separada informa sua expiração. Ambas são apagadas cinco segundos após a expiração. Enquanto consulta o Vault ou calcula o código, o gateway renova o indicador `typing`. O período é configurável em `totp.period_seconds` e deve coincidir com o período das entradas TOTP, cujo padrão é 30 segundos.
+
+O gateway configura `/totp` no menu do bot somente no escopo individual da conversa privada de cada owner. Essa sincronização ocorre ao iniciar ou reiniciar o listener e após um pairing bem-sucedido; o gateway nunca configura esse comando em escopos globais, privados gerais ou de grupos.
+
 O adaptador de Windows Service usa o mesmo supervisor e requer `pywin32`:
 
 ```powershell

@@ -131,3 +131,116 @@ def test_pair_feedback_and_three_failures(tmp_path):
     manager.process_update("main", message("/pair 333333"))
     assert "cancelado por excesso" in sent[-1]
     assert json.loads((root / "state" / "pairing.json").read_text(encoding="utf-8")) == {}
+
+
+def test_totp_private_owner_flow_is_paginated_and_ephemeral(tmp_path):
+    root = tmp_path / "telegram"
+    bots = root / "bots"
+    bots.mkdir(parents=True)
+    (bots / "main.json").write_text(json.dumps({
+        "id": "main", "owners": [{"user_id": 123}],
+        "totp": {"enabled": True, "profile": "unused", "period_seconds": 30},
+    }), encoding="utf-8")
+    manager = TelegramManager(root)
+    sent, deleted, callbacks, typing = [], [], [], []
+    next_id = iter(range(100, 200))
+    runtime = manager.bots["main"]
+    runtime.send = lambda chat_id, text, thread_id=None, reply_markup=None, protect_content=False: sent.append((text, reply_markup, protect_content)) or {"message_id": next(next_id)}
+    runtime.delete = lambda chat_id, message_id: deleted.append(message_id) or True
+    runtime.answer_callback = lambda callback_id, text=None: callbacks.append((callback_id, text)) or True
+    runtime.typing = lambda chat_id: typing.append(chat_id) or True
+    manager._schedule_delete = lambda *args: None
+    profile = {"real_password_entry": "real", "fake_password_entry": "fake"}
+    manager.tokens.totp_profile = lambda path: profile
+    manager.tokens.read = lambda _profile, entry, _field="password": {"real": "real-password", "fake": "fake-password"}[entry]
+    manager.tokens.list_totp = lambda _profile: ["Mail/zulu", "Mail/Alpha"]
+    manager.tokens.current_totp = lambda _profile, entry: "123456"
+    owner_message = lambda text, message_id: {"message": {
+        "text": text, "message_id": message_id, "chat": {"id": 123, "type": "private"},
+        "from": {"id": 123},
+    }}
+    manager.process_update("main", owner_message("/totp", 1))
+    assert sent[-1][0] == "Envie a senha TOTP."
+    manager.process_update("main", owner_message("real-password", 2))
+    assert sent[-1][0] == "Selecione um TOTP (1–2 de 2)."
+    keyboard = sent[-1][1]["inline_keyboard"]
+    assert [row[0]["text"] for row in keyboard[:2]] == ["Alpha", "zulu"]
+    callback_data = keyboard[0][0]["callback_data"]
+    manager.process_update("main", {"callback_query": {
+        "id": "callback", "data": callback_data, "from": {"id": 123},
+        "message": {"message_id": 101, "chat": {"id": 123, "type": "private"}},
+    }})
+    assert sent[-2][0] == "123456" and sent[-2][2] is False
+    assert sent[-1][0].startswith("Expira em ") and sent[-1][2] is True
+    assert all(item[2] for item in sent[:-2])
+    assert 1 in deleted and 2 in deleted
+    assert callbacks == [("callback", None)]
+    assert typing == [123, 123]
+
+
+def test_totp_is_ignored_outside_private_owner_chat(tmp_path):
+    root = tmp_path / "telegram"
+    bots = root / "bots"
+    bots.mkdir(parents=True)
+    (bots / "main.json").write_text(json.dumps({"id": "main", "owners": [{"user_id": 123}], "totp": {"enabled": True}}), encoding="utf-8")
+    manager = TelegramManager(root)
+    sent = []
+    manager.bots["main"].send = lambda *args, **kwargs: sent.append(args) or {}
+    manager.process_update("main", {"message": {
+        "text": "/totp", "message_id": 1, "chat": {"id": -100, "type": "supergroup"}, "from": {"id": 123},
+    }})
+    assert sent == []
+
+
+def test_totp_command_menu_is_scoped_only_to_owner_private_chat(tmp_path):
+    root = tmp_path / "telegram"
+    bots = root / "bots"
+    bots.mkdir(parents=True)
+    (bots / "main.json").write_text(json.dumps({
+        "id": "main", "owners": [{"user_id": 123}, {"user_id": "invalid"}],
+        "totp": {"enabled": True}, "listener": {"enabled": True, "mode": "polling"},
+    }), encoding="utf-8")
+    manager = TelegramManager(root)
+    runtime = manager.bots["main"]
+    configured = []
+    runtime.start = lambda: setattr(runtime, "state", "running") or runtime.status()
+    runtime.set_owner_totp_command = lambda owner_id: configured.append(owner_id) or True
+    manager.start()
+    assert configured == [123]
+
+
+def test_owner_totp_command_uses_private_chat_scope(tmp_path):
+    root = tmp_path / "telegram"
+    bots = root / "bots"
+    bots.mkdir(parents=True)
+    (bots / "main.json").write_text(json.dumps({"id": "main", "owners": [], "totp": {"enabled": True}}), encoding="utf-8")
+    runtime = TelegramManager(root).bots["main"]
+    calls = []
+
+    class Api:
+        def set_my_commands(self, commands, scope):
+            calls.append((commands, scope))
+            return True
+
+    runtime.api = Api()
+    assert runtime.set_owner_totp_command(123)
+    assert calls == [([{"command": "totp", "description": "Obter código de autenticação"}], {"type": "chat", "chat_id": 123})]
+
+
+def test_totp_command_menu_is_reconciled_after_pairing(tmp_path):
+    root = tmp_path / "telegram"
+    bots = root / "bots"
+    bots.mkdir(parents=True)
+    (bots / "main.json").write_text(json.dumps({"id": "main", "owners": [], "totp": {"enabled": True}}), encoding="utf-8")
+    manager = TelegramManager(root)
+    runtime = manager.bots["main"]
+    runtime.state = "running"
+    configured = []
+    runtime.set_owner_totp_command = lambda owner_id: configured.append(owner_id) or True
+    runtime.send = lambda *args, **kwargs: {}
+    pairing = manager.pair_request("main")
+    manager.process_update("main", {"message": {
+        "text": f"/pair {pairing['pin']}", "chat": {"id": -100, "type": "supergroup"},
+        "from": {"id": 123},
+    }})
+    assert configured == [123]
