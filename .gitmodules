@@ -32,3 +32,7 @@
 	path = .agents/skills/integrations/omie
 	url = git@github.com:rodrigogml/skillOmie.git
 	branch = main
+[submodule ".agents/skills/integrations/aws"]
+	path = .agents/skills/integrations/aws
+	url = git@github.com:rodrigogml/skillAWS.git
+	branch = main
