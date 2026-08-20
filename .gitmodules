@@ -28,3 +28,7 @@
 	path = .agents/skills/integrations/forward-email
 	url = git@github.com:rodrigogml/skillForwardEmail.git
 	branch = main
+[submodule ".agents/skills/integrations/omie"]
+	path = .agents/skills/integrations/omie
+	url = git@github.com:rodrigogml/skillOmie.git
+	branch = main
