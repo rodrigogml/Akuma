@@ -12,6 +12,13 @@ class TelegramApiError(RuntimeError):
     pass
 
 
+class TelegramRateLimitError(TelegramApiError):
+    def __init__(self, retry_after: int, method: str):
+        self.retry_after = retry_after
+        self.method = method
+        super().__init__(f"Telegram rate limit for {method}; retry after {retry_after} seconds")
+
+
 class TelegramBotApi:
     def __init__(self, token: str, timeout: float = 30):
         self._base = f"https://api.telegram.org/bot{token}/"
@@ -28,15 +35,33 @@ class TelegramBotApi:
         except HTTPError as exc:
             try:
                 payload = json.loads(exc.read().decode("utf-8"))
+                retry_after = self._retry_after(payload)
+                if exc.code == 429 and retry_after is not None:
+                    raise TelegramRateLimitError(retry_after, method) from exc
                 description = payload.get("description", f"HTTP {exc.code}")
+            except TelegramRateLimitError:
+                raise
             except Exception:
                 description = f"HTTP {exc.code}"
             raise TelegramApiError(f"Telegram API rejected {method}: {description}") from exc
         except Exception as exc:
             raise TelegramApiError(f"Telegram API request failed: {type(exc).__name__}") from exc
         if not payload.get("ok"):
+            retry_after = self._retry_after(payload)
+            if retry_after is not None:
+                raise TelegramRateLimitError(retry_after, method)
             raise TelegramApiError(f"Telegram API rejected {method}: {payload.get('description', 'unknown error')}")
         return payload.get("result")
+
+    @staticmethod
+    def _retry_after(payload: Any) -> int | None:
+        if not isinstance(payload, dict):
+            return None
+        parameters = payload.get("parameters")
+        value = parameters.get("retry_after") if isinstance(parameters, dict) else None
+        if isinstance(value, int) and value > 0:
+            return value
+        return None
 
     def get_me(self) -> dict[str, Any]:
         return self.call("getMe")

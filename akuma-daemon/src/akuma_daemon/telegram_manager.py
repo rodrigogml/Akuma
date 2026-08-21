@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path
+import random
 import re
 import secrets
 import shutil
@@ -15,7 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 
 from .rpc import RpcServer
-from .telegram_api import TelegramApiError, TelegramBotApi
+from .telegram_api import TelegramApiError, TelegramBotApi, TelegramRateLimitError
 from .telegram_agent import AgentConfigurationError, TelegramAgentRuntime, write_json
 from .telegram_speech import voice_transcription_settings
 from .telegram_vault import VaultResolutionError, VaultTokenResolver
@@ -38,6 +39,45 @@ CONFIG_BOT_COMMAND = {"command": "config", "description": "Configurar esta conve
 NEW_COMMAND_RE = re.compile(r"^/new(?:@\w+)?\s*$", re.IGNORECASE)
 CONFIG_COMMAND_RE = re.compile(r"^/config(?:@\w+)?\s*$", re.IGNORECASE)
 CONFIG_SESSION_SECONDS = 3 * 60
+OUTBOUND_GLOBAL_MESSAGES_PER_SECOND = 25
+OUTBOUND_PRIVATE_MESSAGE_INTERVAL_SECONDS = 1.0
+OUTBOUND_GROUP_MESSAGE_INTERVAL_SECONDS = 3.0
+POLL_TIMEOUT_MARGIN_SECONDS = 10
+POLL_FAILURE_MAX_BACKOFF_SECONDS = 60
+
+
+class OutboundRateLimiter:
+    """Reserve outgoing message slots per bot without exceeding Telegram's published limits."""
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic, sleeper: Callable[[float], None] = time.sleep):
+        self.clock = clock
+        self.sleeper = sleeper
+        self.lock = threading.Lock()
+        self.global_next = 0.0
+        self.blocked_until = 0.0
+        self.chat_next: dict[str, float] = {}
+
+    @staticmethod
+    def _interval(chat_id: int | str) -> float:
+        try:
+            return OUTBOUND_GROUP_MESSAGE_INTERVAL_SECONDS if int(chat_id) < 0 else OUTBOUND_PRIVATE_MESSAGE_INTERVAL_SECONDS
+        except (TypeError, ValueError):
+            return OUTBOUND_PRIVATE_MESSAGE_INTERVAL_SECONDS
+
+    def reserve_message(self, chat_id: int | str) -> None:
+        key = str(chat_id)
+        with self.lock:
+            now = self.clock()
+            scheduled = max(now, self.blocked_until, self.global_next, self.chat_next.get(key, 0.0))
+            self.global_next = scheduled + (1.0 / OUTBOUND_GLOBAL_MESSAGES_PER_SECOND)
+            self.chat_next[key] = scheduled + self._interval(chat_id)
+        delay = scheduled - self.clock()
+        if delay > 0:
+            self.sleeper(delay)
+
+    def block(self, retry_after: int) -> None:
+        with self.lock:
+            self.blocked_until = max(self.blocked_until, self.clock() + max(1, retry_after))
 
 
 def _read_json(path: Path, default: Any) -> Any:
@@ -108,13 +148,16 @@ class BotRuntime:
         self.api: TelegramBotApi | None = None
         self.bot_identity: dict[str, Any] | None = None
         self.agent: TelegramAgentRuntime | None = None
+        self.outbound_limiter = OutboundRateLimiter()
 
     def _connect(self) -> None:
         profile = self.config.data["profile"]
         if isinstance(profile, str) and not Path(profile).is_absolute():
             profile = str((self.config.path.parent / profile).resolve())
         token = self.manager.tokens.resolve(profile)
-        self.api = TelegramBotApi(token)
+        poll_timeout = int(self.config.listener.get("poll_timeout", 30))
+        api_timeout = max(30, poll_timeout + POLL_TIMEOUT_MARGIN_SECONDS) if self.config.listener.get("mode", "polling") == "polling" else 30
+        self.api = TelegramBotApi(token, timeout=api_timeout)
         self.bot_identity = self.api.get_me()
 
     def start(self) -> dict[str, Any]:
@@ -158,15 +201,23 @@ class BotRuntime:
         allowed = list(self.config.listener.get("allowed_updates") or ["message"])
         if (self.config.data.get("totp", {}).get("enabled") or self.config.data.get("agent", {}).get("enabled")) and "callback_query" not in allowed:
             allowed.append("callback_query")
+        failures = 0
         while not self.stop_event.is_set():
             try:
                 for update in self.api.get_updates(offset, timeout, allowed):  # type: ignore[union-attr]
                     offset = int(update["update_id"]) + 1
                     _write_json(state_path, {"update_offset": offset})
                     self.manager.process_update(self.config.bot_id, update)
-            except Exception as exc:
+                failures = 0
+                self.last_error = None
+            except TelegramRateLimitError as exc:
                 self.last_error = str(exc)
-                self.stop_event.wait(5)
+                self.stop_event.wait(exc.retry_after)
+            except Exception as exc:
+                failures += 1
+                self.last_error = str(exc)
+                delay = min(POLL_FAILURE_MAX_BACKOFF_SECONDS, 2 ** min(failures - 1, 6)) + random.uniform(0.0, 0.5)
+                self.stop_event.wait(delay)
 
     def _configure_webhook(self) -> None:
         webhook = self.config.listener.get("webhook", {})
@@ -185,23 +236,23 @@ class BotRuntime:
              reply_markup: dict[str, Any] | None = None, protect_content: bool = False) -> dict[str, Any]:
         if not self.api:
             self._connect()
-        return self.api.send_message(chat_id, text, thread_id, reply_markup, protect_content)  # type: ignore[union-attr]
+        return self._outbound(lambda: self.api.send_message(chat_id, text, thread_id, reply_markup, protect_content), chat_id, message=True)  # type: ignore[union-attr]
 
     def delete(self, chat_id: int | str, message_id: int) -> bool:
         if not self.api:
             self._connect()
-        return self.api.delete_message(chat_id, message_id)  # type: ignore[union-attr]
+        return self._outbound(lambda: self.api.delete_message(chat_id, message_id))  # type: ignore[union-attr]
 
     def answer_callback(self, callback_id: str, text: str | None = None, show_alert: bool = False) -> bool:
         if not self.api:
             self._connect()
-        return self.api.answer_callback_query(callback_id, text, show_alert)  # type: ignore[union-attr]
+        return self._outbound(lambda: self.api.answer_callback_query(callback_id, text, show_alert))  # type: ignore[union-attr]
 
     def edit(self, chat_id: int | str, message_id: int, text: str,
              reply_markup: dict[str, Any] | None = None) -> dict[str, Any]:
         if not self.api:
             self._connect()
-        return self.api.edit_message_text(chat_id, message_id, text, reply_markup)  # type: ignore[union-attr]
+        return self._outbound(lambda: self.api.edit_message_text(chat_id, message_id, text, reply_markup))  # type: ignore[union-attr]
 
     def download(self, file_id: str, destination: Path, maximum_bytes: int) -> Path:
         if not self.api:
@@ -211,7 +262,7 @@ class BotRuntime:
     def typing(self, chat_id: int | str) -> bool:
         if not self.api:
             self._connect()
-        return self.api.send_chat_action(chat_id, "typing")  # type: ignore[union-attr]
+        return self._outbound(lambda: self.api.send_chat_action(chat_id, "typing"))  # type: ignore[union-attr]
 
     def set_owner_commands(self, owner_id: int) -> bool:
         if not self.api:
@@ -222,7 +273,19 @@ class BotRuntime:
             commands.extend([NEW_BOT_COMMAND, CONFIG_BOT_COMMAND])
         if self.config.data.get("totp", {}).get("enabled"):
             commands.append(TOTP_BOT_COMMAND)
-        return self.api.set_my_commands(commands, scope)  # type: ignore[union-attr]
+        return self._outbound(lambda: self.api.set_my_commands(commands, scope))  # type: ignore[union-attr]
+
+    def _outbound(self, operation: Callable[[], Any], chat_id: int | str | None = None, message: bool = False) -> Any:
+        for attempt in range(2):
+            if message and chat_id is not None:
+                self.outbound_limiter.reserve_message(chat_id)
+            try:
+                return operation()
+            except TelegramRateLimitError as exc:
+                self.outbound_limiter.block(exc.retry_after)
+                if attempt:
+                    raise
+        raise RuntimeError("unreachable")
 
     def set_owner_totp_command(self, owner_id: int) -> bool:
         return self.set_owner_commands(owner_id)
