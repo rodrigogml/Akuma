@@ -25,7 +25,7 @@
 
 ## 整理 (Seiri) - Organização
 - Mantenha o projeto organizado conforme a seguinte estrutura:
-	- Na raiz (`/`), são permitidos somente arquivos de governança do projeto (`AGENTS.md`, `README.md`, `.gitignore`, `.gitattributes` e `.gitmodules`) e o `PRIVATE-NOTES.md`, que reúne contexto local e sensível para complementar as skills sem expor essas informações em arquivos versionados ou respostas.
+	- Na raiz (`/`), são permitidos somente arquivos de governança do projeto (`AGENTS.md`, `README.md`, `.gitignore`, `.gitattributes` e `.gitmodules`), o `PRIVATE-NOTES.md`, que reúne contexto local e sensível para complementar as skills sem expor essas informações em arquivos versionados ou respostas, e o `PENDING-KNOWLEDGE.md`, fila local e ignorada pelo versionamento de candidatos a conhecimento.
 	- `/configs/` é ignorado pelo versionamento e exclusivo para configurações locais e dados de execução não versionados. Nunca armazene segredos, chaves, bancos de dados, caches ou estados de execução em diretórios versionados.
 	- `/etc/` armazena exclusivamente recursos anexos, identidade visual e outros recursos estáticos compartilhados do projeto.
 	- `/.agents/skills/` contém as skills do Akuma, organizadas conforme a seção `Organização - Skills`.
@@ -47,3 +47,25 @@ O conteúdo do diretório `/.agents/skills/` deve ser organizado da seguinte for
 	- `configs/` somente para modelos de configuração sem segredos. Arquivos reais de definição de perfis devem ir para `/configs/` na raiz.
 
 ## 自己研鑽 (Jiko Kensan) - Autoaperfeiçoamento
+
+- Em toda solicitação, responda e execute normalmente. Ao analisar o contexto, identifique de forma silenciosa se surgiu algum conhecimento candidato a ser incorporado a uma skill da categoria `knowledge`.
+- Faça apenas uma triagem breve em cada solicitação. Leia, crie ou reorganize a fila somente quando houver um candidato relevante, e limite a curadoria aos itens do mesmo domínio.
+- Registre um candidato em `PENDING-KNOWLEDGE.md` somente quando atender a todos estes critérios:
+	- for uma regra, procedimento, rotina, solução de problema, decisão operacional ou conhecimento de domínio reutilizável;
+	- for acionável e compreensível fora do contexto da tarefa que o revelou;
+	- tiver origem confiável, confirmação suficiente ou for uma orientação explícita do usuário;
+	- puder beneficiar uma skill `knowledge` existente ou justificar claramente a criação de uma nova.
+	- tiver impacto provável: evitar erro recorrente, poupar investigação futura ou orientar uma operação repetível.
+- Não registre memórias de tarefas, histórico de execução, dados pontuais, estados transitórios, resultados isolados, hipóteses não verificadas, preferências de conversa, credenciais, identificadores, informações pessoais ou qualquer conteúdo que não possa ser abstraído sem dados sensíveis.
+- A fila é apenas uma área de curadoria e nunca uma fonte de verdade operacional. Não use um candidato pendente para orientar ações; use somente uma skill consolidada, documentação validada ou instrução atual do usuário.
+- Antes de incluir ou reorganizar um candidato, verifique a skill de destino e os itens pendentes do mesmo domínio. Evite duplicatas, variações da mesma ideia e registros genéricos.
+- Ao obter informações novas sobre candidatos relacionados, mantenha a fila útil: reformule itens para ganhar precisão ou clareza, funda itens equivalentes, divida itens que reúnam conhecimentos independentes e descarte itens incorretos, obsoletos ou sem mérito. Não reorganize itens de domínios não relacionados e não use a fila como histórico de conversa.
+- Crie `PENDING-KNOWLEDGE.md` somente quando houver o primeiro candidato. O arquivo deve conter o título `# Conhecimento pendente`, a linha `<!-- Próximo ID: K-001 -->`, a seção `## Pendentes` e itens numerados no formato `1. [K-001] [knowledge/<skill-alvo> | nova skill: <nome>] <regra ou procedimento conciso; use condição/gatilho → ação → validação ou resultado esperado, quando aplicável>`.
+- O número da lista facilita a leitura, mas o identificador `K-<número>` é a referência estável para tratamento e nunca deve ser reutilizado. Atualize `Próximo ID` após criar cada item; lacunas entre identificadores são esperadas.
+- Cada item deve ter uma linha-resumo. Acrescente linhas de detalhe somente quando forem essenciais para consolidar o conhecimento, preservando a concisão e sem reproduzir dados sensíveis, históricos brutos ou dados de execução.
+- Todo candidato deve ter uma origem aceita e rastreável: instrução ou informação explícita do usuário; conteúdo fornecido pelo usuário, como documentos e anexos; ou pesquisa solicitada pelo usuário, desde que a informação tenha sido confirmada ou utilizada na solução da tarefa. Registre a origem em uma linha de detalhe concisa: `Origem: usuário`, `Origem: documento fornecido pelo usuário`, `Origem: pesquisa solicitada pelo usuário — utilizada na solução` ou `Origem: pesquisa solicitada pelo usuário — confirmada`.
+- Não registre como conhecimento deduções, estratégias, decisões, tentativas, etapas intermediárias ou justificativas produzidas pelo próprio agente durante a solução. O raciocínio do agente pode decidir se uma informação externa merece ser registrada, mas nunca pode ser a fonte do conteúdo registrado.
+- Ao incluir, reformular, fundir, dividir ou descartar candidatos, informe a alteração ao final da resposta normal em uma linha concisa, identificando os IDs envolvidos. Use o formato `※ Aprendizado [Operação]: <linha-resumo do PENDING-KNOWLEDGE.md>`; se não houver alteração na fila, não a mencione.
+- Inclua no máximo um candidato novo por resposta, exceto quando houver candidatos independentes e de alto impacto. Priorize sempre o conhecimento mais reutilizável.
+- Nunca incorpore automaticamente candidatos às skills. Quando o usuário solicitar o tratamento do conhecimento pendente, identifique os itens pelo número visível ou pelo ID estável, revise-os, descarte os que não tenham mérito ou confirmação suficiente e proponha as alterações nas skills de `knowledge` conforme os preceitos de aprovação de diff.
+- Após a aprovação e a aplicação de um aprendizado, remova da fila o item que lhe deu origem. Ao fundir candidatos, preserve o ID mais antigo; ao dividir um candidato, remova o original e crie novos IDs; ao descartar um item, remova-o e informe brevemente o motivo, sem alterar nenhuma skill. Os IDs de candidatos não devem ser transportados para a skill final.

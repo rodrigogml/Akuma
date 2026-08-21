@@ -1,0 +1,54 @@
+{
+  "id": "subbot-exemplo",
+  "name": "Subbot Exemplo",
+  "profile": "C:/caminho/telegram-subbot.ini",
+  "listener": {
+    "enabled": false,
+    "mode": "polling",
+    "poll_timeout": 30,
+    "allowed_updates": ["message", "callback_query"]
+  },
+  "agent": {
+    "enabled": true,
+    "context": "subbot",
+    "codex_executable": "C:/caminho/codex.exe",
+    "codex_home": "codexhome",
+    "working_directory": "codexwork",
+    "model": "gpt-5.6-luna",
+    "reasoning_effort": "medium",
+    "sandbox": "workspace-write",
+    "approval_policy": "never",
+    "network_access": false,
+    "turn_timeout_seconds": 900,
+    "max_parallel_conversations": 2,
+    "max_pending_items": 50,
+    "instructions": {
+      "gateway_profile": "telegram-v1",
+      "developer_file": "developer.md"
+    },
+    "filesystem": {
+      "read_access": "restricted",
+      "readable_roots": [],
+      "additional_writable_roots": []
+    },
+    "skills": []
+  },
+  "vault": {
+    "profile": "vault/keepass.ini",
+    "access": "read_only",
+    "auth": {
+      "mode": "windows_credential_manager",
+      "target": "CREDENCIAL-DO-SUBBOT"
+    }
+  },
+  "voice_transcription": {
+    "enabled": false,
+    "provider": "eccovox",
+    "base_url": "http://127.0.0.1:8870",
+    "request_timeout_seconds": 120,
+    "queue_timeout_seconds": 180,
+    "language": "pt-BR",
+    "profile": "balanced",
+    "max_audio_bytes": 10485760
+  }
+}

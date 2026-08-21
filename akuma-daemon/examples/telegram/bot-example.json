@@ -14,5 +14,30 @@
     "profile": "C:/x/Akuma/configs/telegram_akuma.ini",
     "period_seconds": 30
   },
-  "owners": []
+  "agent": {
+    "enabled": true,
+    "context": "akuma",
+    "instructions": {
+      "gateway_profile": "telegram-v1",
+      "developer": "Mantenha a identidade, o comportamento e os objetivos do Akuma."
+    }
+  },
+  "voice_transcription": {
+    "enabled": true,
+    "provider": "eccovox",
+    "base_url": "http://127.0.0.1:8870",
+    "request_timeout_seconds": 120,
+    "queue_timeout_seconds": 180,
+    "language": "pt-BR",
+    "profile": "balanced",
+    "max_audio_bytes": 10485760
+  },
+  "vault": {
+    "profile": "vault/keepass.ini",
+    "access": "read_write",
+    "auth": {
+      "mode": "windows_credential_manager",
+      "target": "CREDENCIAL-DO-AKUMA"
+    }
+  }
 }

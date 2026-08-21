@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "contacts": [
+    {
+      "telegram_user_id": 123456789,
+      "username": "usuario",
+      "display_name": "Usuário",
+      "roles": ["owner"],
+      "added_at": 0,
+      "source": "pair"
+    }
+  ]
+}

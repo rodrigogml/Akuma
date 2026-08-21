@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 from datetime import datetime
 import json
+import os
 from pathlib import Path
+import subprocess
 
 from .service import create_supervisor, data_directory
 from .supervisor import read_endpoint
@@ -40,8 +42,15 @@ def main(argv: list[str] | None = None) -> int:
     telegram = sub.add_parser("telegram")
     telegram_sub = telegram.add_subparsers(dest="telegram_action", required=True)
     telegram_sub.add_parser("bots")
-    for action in ("status", "start-listener", "stop-listener", "owners", "pair-request"):
+    for action in ("status", "start-listener", "stop-listener", "owners", "pair-request",
+                   "agent-init", "agent-sync", "agent-login", "agent-status", "agent-validate"):
         command = telegram_sub.add_parser(action); command.add_argument("bot_id")
+        if action == "agent-validate":
+            command.add_argument("--require-login", action="store_true")
+    migrate = telegram_sub.add_parser("migrate-bots")
+    migrate_mode = migrate.add_mutually_exclusive_group(required=True)
+    migrate_mode.add_argument("--dry-run", action="store_true")
+    migrate_mode.add_argument("--apply", action="store_true")
     send = telegram_sub.add_parser("send")
     send.add_argument("bot_id"); send.add_argument("chat_id"); send.add_argument("text")
     send.add_argument("--thread-id", type=int)
@@ -60,6 +69,20 @@ def main(argv: list[str] | None = None) -> int:
     if ns.action == "telegram":
         if ns.telegram_action == "bots":
             method, params = "telegram.bots", {}
+        elif ns.telegram_action == "migrate-bots":
+            method, params = "telegram.migrate-bots", {"apply": bool(ns.apply)}
+        elif ns.telegram_action == "agent-login":
+            spec = rpc_call(host, port, token, "telegram.bot.agent-login-prepare", {"bot_id": ns.bot_id})
+            env = os.environ.copy(); env.update(spec.get("environment") or {})
+            if spec.get("codex_home"):
+                env["CODEX_HOME"] = spec["codex_home"]
+            try:
+                result = subprocess.run([spec["executable"], "login"], cwd=spec["working_directory"], env=env)
+            finally:
+                rpc_call(host, port, token, "telegram.bot.agent-login-finish", {
+                    "bot_id": ns.bot_id, "restart": bool(spec.get("was_running")),
+                })
+            return int(result.returncode)
         elif ns.telegram_action == "send":
             method, params = "telegram.send", {"bot_id": ns.bot_id, "chat_id": ns.chat_id,
                                                  "text": ns.text, "message_thread_id": ns.thread_id}
@@ -68,8 +91,12 @@ def main(argv: list[str] | None = None) -> int:
                 "status": "telegram.bot.status", "start-listener": "telegram.bot.start-listener",
                 "stop-listener": "telegram.bot.stop-listener", "owners": "telegram.bot.owners",
                 "pair-request": "telegram.bot.pair-request",
+                "agent-init": "telegram.bot.agent-init", "agent-sync": "telegram.bot.agent-sync",
+                "agent-status": "telegram.bot.agent-status", "agent-validate": "telegram.bot.agent-validate",
             }[ns.telegram_action]
             params = {"bot_id": ns.bot_id}
+            if ns.telegram_action == "agent-validate":
+                params["require_login"] = bool(ns.require_login)
         print(json.dumps(rpc_call(host, port, token, method, params), ensure_ascii=False, default=str))
         return 0
     if ns.action == "list":

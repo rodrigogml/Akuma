@@ -95,7 +95,8 @@ def test_telegram_pairing_and_fixed_reply(tmp_path):
         "chat": {"id": -100, "type": "supergroup"},
         "from": {"id": 123, "username": "owner", "first_name": "Owner"},
     }})
-    assert manager.bots["main"].config.data["owners"][0]["user_id"] == 123
+    assert manager.bots["main"].agent.contacts.owners()[0]["telegram_user_id"] == 123
+    assert "owners" not in manager.bots["main"].config.data
     assert sent == [(-100, "Pairing concluído com sucesso. Sua conta agora é owner deste bot.", 42)]
     assert manager.pair_request("main")["pin"] != pairing["pin"]
 
@@ -108,7 +109,7 @@ def test_pair_request_replaces_previous_and_caps_timeout(tmp_path):
     manager = TelegramManager(root)
     first = manager.pair_request("main", ttl_seconds=99999)
     second = manager.pair_request("main", ttl_seconds=99999)
-    stored = json.loads((root / "state" / "pairing.json").read_text(encoding="utf-8"))["main"]
+    stored = json.loads((bots / "main" / "state" / "pairing.json").read_text(encoding="utf-8"))
     assert second["pin"] != first["pin"]
     assert stored["expires_at"] - time.time() <= MAX_PAIR_TTL_SECONDS
     assert stored["hash"] != __import__("hashlib").sha256(f"main:{first['pin']}".encode()).hexdigest()
@@ -130,7 +131,7 @@ def test_pair_feedback_and_three_failures(tmp_path):
     manager.process_update("main", message("/pair 222222"))
     manager.process_update("main", message("/pair 333333"))
     assert "cancelado por excesso" in sent[-1]
-    assert json.loads((root / "state" / "pairing.json").read_text(encoding="utf-8")) == {}
+    assert not (bots / "main" / "state" / "pairing.json").exists()
 
 
 def test_totp_private_owner_flow_is_paginated_and_ephemeral(tmp_path):
@@ -204,7 +205,7 @@ def test_totp_command_menu_is_scoped_only_to_owner_private_chat(tmp_path):
     runtime = manager.bots["main"]
     configured = []
     runtime.start = lambda: setattr(runtime, "state", "running") or runtime.status()
-    runtime.set_owner_totp_command = lambda owner_id: configured.append(owner_id) or True
+    runtime.set_owner_commands = lambda owner_id: configured.append(owner_id) or True
     manager.start()
     assert configured == [123]
 
@@ -236,7 +237,7 @@ def test_totp_command_menu_is_reconciled_after_pairing(tmp_path):
     runtime = manager.bots["main"]
     runtime.state = "running"
     configured = []
-    runtime.set_owner_totp_command = lambda owner_id: configured.append(owner_id) or True
+    runtime.set_owner_commands = lambda owner_id: configured.append(owner_id) or True
     runtime.send = lambda *args, **kwargs: {}
     pairing = manager.pair_request("main")
     manager.process_update("main", {"message": {
@@ -244,3 +245,35 @@ def test_totp_command_menu_is_reconciled_after_pairing(tmp_path):
         "from": {"id": 123},
     }})
     assert configured == [123]
+
+
+def test_agent_payload_accepts_only_telegram_voice_for_eccovox(tmp_path):
+    root = tmp_path / "telegram"
+    bots = root / "bots"
+    bots.mkdir(parents=True)
+    (bots / "main.json").write_text(json.dumps({
+        "id": "main", "agent": {"enabled": True},
+        "voice_transcription": {"enabled": True},
+    }), encoding="utf-8")
+    manager = TelegramManager(root)
+    runtime = manager.bots["main"]
+
+    def download(_file_id, destination, _maximum):
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"opus")
+        return destination
+
+    runtime.download = download
+    voice_payload = manager._agent_payload(runtime, {
+        "message_id": 10, "chat": {"id": 7},
+        "voice": {"file_id": "voice-file", "file_size": 4, "duration": 2, "mime_type": "audio/ogg"},
+    })
+    assert voice_payload["attachments"][0]["kind"] == "voice"
+    assert voice_payload["attachments"][0]["path"].endswith("voice-10.ogg")
+
+    media_payload = manager._agent_payload(runtime, {
+        "message_id": 11, "chat": {"id": 7},
+        "audio": {"file_id": "media-file", "file_size": 4},
+    })
+    assert media_payload["attachments"] == []
+    runtime.agent.close()

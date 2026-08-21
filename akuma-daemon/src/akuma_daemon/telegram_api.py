@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError
 from urllib.parse import urlencode
@@ -14,6 +15,7 @@ class TelegramApiError(RuntimeError):
 class TelegramBotApi:
     def __init__(self, token: str, timeout: float = 30):
         self._base = f"https://api.telegram.org/bot{token}/"
+        self._file_base = f"https://api.telegram.org/file/bot{token}/"
         self.timeout = timeout
 
     def call(self, method: str, **params: Any) -> Any:
@@ -61,6 +63,39 @@ class TelegramBotApi:
 
     def delete_message(self, chat_id: int | str, message_id: int) -> bool:
         return bool(self.call("deleteMessage", chat_id=chat_id, message_id=message_id))
+
+    def edit_message_text(self, chat_id: int | str, message_id: int, text: str,
+                          reply_markup: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.call("editMessageText", chat_id=chat_id, message_id=message_id,
+                         text=text, reply_markup=reply_markup)
+
+    def get_file(self, file_id: str) -> dict[str, Any]:
+        return self.call("getFile", file_id=file_id)
+
+    def download_file(self, file_id: str, destination: Path, maximum_bytes: int) -> Path:
+        metadata = self.get_file(file_id)
+        size = metadata.get("file_size")
+        if isinstance(size, int) and size > maximum_bytes:
+            raise TelegramApiError("Telegram file exceeds configured download limit")
+        file_path = metadata.get("file_path")
+        if not isinstance(file_path, str) or not file_path:
+            raise TelegramApiError("Telegram did not provide a downloadable file path")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        request = Request(self._file_base + file_path, method="GET")
+        written = 0
+        try:
+            with urlopen(request, timeout=self.timeout) as response, destination.open("wb") as output:
+                while chunk := response.read(64 * 1024):
+                    written += len(chunk)
+                    if written > maximum_bytes:
+                        raise TelegramApiError("Telegram file exceeds configured download limit")
+                    output.write(chunk)
+        except Exception as exc:
+            destination.unlink(missing_ok=True)
+            if isinstance(exc, TelegramApiError):
+                raise
+            raise TelegramApiError(f"Telegram file download failed: {type(exc).__name__}") from exc
+        return destination
 
     def answer_callback_query(self, callback_query_id: str, text: str | None = None,
                               show_alert: bool = False) -> bool:

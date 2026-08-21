@@ -31,7 +31,12 @@ Dolores é o Raspberry Pi destinado a atuar como servidor local da automação d
 - Kernel: `6.18.34+rpt-rpi-v8`.
 - Temperatura observada: aproximadamente 48,3 °C.
 - Interfaces de rede Ethernet e Wi-Fi ativas; Ethernet usa `192.168.68.100` e Wi-Fi usa `192.168.68.32`.
-- O openHAB ainda não está registrado como serviço systemd.
+- openHAB `5.2.1-1` instalado pelo repositório APT estável oficial.
+- Java OpenJDK 21.0.12 instalado.
+- Serviço `openhab.service` ativo e habilitado no boot.
+- Interface HTTP validada com resposta `200` na porta `8080`.
+- Interface HTTPS validada com resposta `200` na porta `8443`.
+- Addons, persistência e automações ainda não configurados.
 - O Docker está inativo.
 
 ## Limitações e decisões operacionais

@@ -1,0 +1,4 @@
+﻿interface:
+  display_name: "Bots do Telegram"
+  short_description: "Arquitetura e operação de bots e subbots"
+  default_prompt: "Use $telegram-bots para planejar, configurar ou operar um bot ou subbot do gateway Telegram."

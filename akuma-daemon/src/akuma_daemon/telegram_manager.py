@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import re
 import secrets
+import shutil
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -15,6 +16,8 @@ from typing import Any, Callable
 
 from .rpc import RpcServer
 from .telegram_api import TelegramApiError, TelegramBotApi
+from .telegram_agent import AgentConfigurationError, TelegramAgentRuntime, write_json
+from .telegram_speech import voice_transcription_settings
 from .telegram_vault import VaultResolutionError, VaultTokenResolver
 
 
@@ -30,6 +33,11 @@ TOTP_NOTICE_SECONDS = 8
 TOTP_CODE_GRACE_SECONDS = 5
 TYPING_REFRESH_SECONDS = 4
 TOTP_BOT_COMMAND = {"command": "totp", "description": "Obter código de autenticação"}
+NEW_BOT_COMMAND = {"command": "new", "description": "Iniciar uma nova conversa"}
+CONFIG_BOT_COMMAND = {"command": "config", "description": "Configurar esta conversa"}
+NEW_COMMAND_RE = re.compile(r"^/new(?:@\w+)?\s*$", re.IGNORECASE)
+CONFIG_COMMAND_RE = re.compile(r"^/config(?:@\w+)?\s*$", re.IGNORECASE)
+CONFIG_SESSION_SECONDS = 3 * 60
 
 
 def _read_json(path: Path, default: Any) -> Any:
@@ -99,9 +107,13 @@ class BotRuntime:
         self.last_error: str | None = None
         self.api: TelegramBotApi | None = None
         self.bot_identity: dict[str, Any] | None = None
+        self.agent: TelegramAgentRuntime | None = None
 
     def _connect(self) -> None:
-        token = self.manager.tokens.resolve(self.config.data["profile"])
+        profile = self.config.data["profile"]
+        if isinstance(profile, str) and not Path(profile).is_absolute():
+            profile = str((self.config.path.parent / profile).resolve())
+        token = self.manager.tokens.resolve(profile)
         self.api = TelegramBotApi(token)
         self.bot_identity = self.api.get_me()
 
@@ -120,6 +132,8 @@ class BotRuntime:
             else:
                 raise ValueError("listener.mode must be polling or webhook")
             self.thread.start(); self.state, self.last_error = "running", None
+            if self.agent and self.agent.enabled:
+                self.agent.start()
         except Exception as exc:
             self.state, self.last_error = "failed", str(exc)
         return self.status()
@@ -131,16 +145,18 @@ class BotRuntime:
             except TelegramApiError: pass
         if self.thread:
             self.thread.join(timeout=5)
+        if self.agent:
+            self.agent.suspend()
         self.state = "stopped"
         return self.status()
 
     def _poll(self) -> None:
-        state_path = self.manager.state_dir / f"{self.config.bot_id}.json"
+        state_path = (self.agent.paths.state_dir if self.agent else self.manager.state_dir / self.config.bot_id) / "listener.json"
         state = _read_json(state_path, {})
         offset = state.get("update_offset")
         timeout = int(self.config.listener.get("poll_timeout", 30))
         allowed = list(self.config.listener.get("allowed_updates") or ["message"])
-        if self.config.data.get("totp", {}).get("enabled") and "callback_query" not in allowed:
+        if (self.config.data.get("totp", {}).get("enabled") or self.config.data.get("agent", {}).get("enabled")) and "callback_query" not in allowed:
             allowed.append("callback_query")
         while not self.stop_event.is_set():
             try:
@@ -158,7 +174,7 @@ class BotRuntime:
         if not isinstance(url, str) or not url:
             raise ValueError("webhook listener requires listener.webhook.url")
         allowed = list(self.config.listener.get("allowed_updates") or ["message"])
-        if self.config.data.get("totp", {}).get("enabled") and "callback_query" not in allowed:
+        if (self.config.data.get("totp", {}).get("enabled") or self.config.data.get("agent", {}).get("enabled")) and "callback_query" not in allowed:
             allowed.append("callback_query")
         self.api.set_webhook(url, webhook.get("secret_token"), allowed)  # type: ignore[union-attr]
 
@@ -176,51 +192,136 @@ class BotRuntime:
             self._connect()
         return self.api.delete_message(chat_id, message_id)  # type: ignore[union-attr]
 
-    def answer_callback(self, callback_id: str, text: str | None = None) -> bool:
+    def answer_callback(self, callback_id: str, text: str | None = None, show_alert: bool = False) -> bool:
         if not self.api:
             self._connect()
-        return self.api.answer_callback_query(callback_id, text)  # type: ignore[union-attr]
+        return self.api.answer_callback_query(callback_id, text, show_alert)  # type: ignore[union-attr]
+
+    def edit(self, chat_id: int | str, message_id: int, text: str,
+             reply_markup: dict[str, Any] | None = None) -> dict[str, Any]:
+        if not self.api:
+            self._connect()
+        return self.api.edit_message_text(chat_id, message_id, text, reply_markup)  # type: ignore[union-attr]
+
+    def download(self, file_id: str, destination: Path, maximum_bytes: int) -> Path:
+        if not self.api:
+            self._connect()
+        return self.api.download_file(file_id, destination, maximum_bytes)  # type: ignore[union-attr]
 
     def typing(self, chat_id: int | str) -> bool:
         if not self.api:
             self._connect()
         return self.api.send_chat_action(chat_id, "typing")  # type: ignore[union-attr]
 
-    def set_owner_totp_command(self, owner_id: int) -> bool:
+    def set_owner_commands(self, owner_id: int) -> bool:
         if not self.api:
             self._connect()
         scope = {"type": "chat", "chat_id": owner_id}
-        return self.api.set_my_commands([TOTP_BOT_COMMAND], scope)  # type: ignore[union-attr]
+        commands: list[dict[str, str]] = []
+        if self.config.data.get("agent", {}).get("enabled"):
+            commands.extend([NEW_BOT_COMMAND, CONFIG_BOT_COMMAND])
+        if self.config.data.get("totp", {}).get("enabled"):
+            commands.append(TOTP_BOT_COMMAND)
+        return self.api.set_my_commands(commands, scope)  # type: ignore[union-attr]
+
+    def set_owner_totp_command(self, owner_id: int) -> bool:
+        return self.set_owner_commands(owner_id)
 
     def status(self) -> dict[str, Any]:
         return {"id": self.config.bot_id, "state": self.state,
                 "listener_enabled": bool(self.config.listener.get("enabled", False)),
                 "listener_mode": self.config.listener.get("mode", "polling"),
                 "bot_username": (self.bot_identity or {}).get("username"),
-                "last_error": self.last_error}
+                "last_error": self.last_error,
+                "agent": self.agent.status() if self.agent else {"enabled": False, "state": "disabled"}}
 
 
 class TelegramManager:
     def __init__(self, root: str | Path):
         self.root = Path(root)
-        self.bots_dir = self.root / "bots"
+        self.project_root = self._find_project_root(self.root)
+        self.bots_dir = self.project_root / "configs" / "telegram" / "bots" if self.project_root else self.root / "bots"
+        self.legacy_bots_dir = self.root / "bots"
         self.state_dir = self.root / "state"
-        self.pairing_file = self.state_dir / "pairing.json"
-        self.totp_cleanup_file = self.state_dir / "totp_cleanup.json"
-        self.bots_dir.mkdir(parents=True, exist_ok=True); self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.bots_dir.mkdir(parents=True, exist_ok=True); self.legacy_bots_dir.mkdir(parents=True, exist_ok=True)
+        self.state_dir.mkdir(parents=True, exist_ok=True)
         self.tokens = VaultTokenResolver()
         self.bots: dict[str, BotRuntime] = {}
-        for path in sorted(self.bots_dir.glob("*.json")):
+        paths = list(sorted(self.bots_dir.glob("*/bot.json")))
+        paths.extend(path for path in sorted(self.legacy_bots_dir.glob("*.json"))
+                     if path.name != "manager.json" and not any(existing.parent.name == path.stem for existing in paths))
+        for path in paths:
             data = _read_json(path, {})
             if isinstance(data, dict) and data.get("id"):
-                self.bots[str(data["id"])] = BotRuntime(self, BotConfig(data, path))
+                config = BotConfig(data, path)
+                self._migrate_contacts(config)
+                runtime = BotRuntime(self, config)
+                try:
+                    runtime.agent = TelegramAgentRuntime(runtime, self.project_root or self.root)
+                except AgentConfigurationError as exc:
+                    runtime.last_error = str(exc)
+                self.bots[str(data["id"])] = runtime
         self.webhook: WebhookReceiver | None = None
         self.stop_event = threading.Event()
         self.totp_sessions: dict[str, dict[str, Any]] = {}
         self.totp_timers: dict[str, threading.Timer] = {}
         self.totp_cleanup_lock = threading.Lock()
-        pending = _read_json(self.totp_cleanup_file, {})
-        self.totp_pending_deletions: dict[str, dict[str, Any]] = pending if isinstance(pending, dict) else {}
+        self.totp_pending_deletions: dict[str, dict[str, Any]] = {}
+        for bot_id in self.bots:
+            pending = _read_json(self._bot_state_file(bot_id, "totp_cleanup.json"), {})
+            if isinstance(pending, dict):
+                self.totp_pending_deletions.update(pending)
+        self.config_sessions: dict[str, dict[str, Any]] = {}
+        self.config_timers: dict[str, threading.Timer] = {}
+
+    @staticmethod
+    def _find_project_root(root: Path) -> Path | None:
+        resolved = root.resolve()
+        for candidate in (resolved, *resolved.parents):
+            if (candidate / "AGENTS.md").exists() and (candidate / "akuma-daemon").is_dir():
+                return candidate
+        return None
+
+    def _migrate_contacts(self, config: BotConfig) -> None:
+        modern = config.path.name.casefold() == "bot.json"
+        contacts_path = config.path.parent / "contacts.json" if modern else config.path.with_name(f"{config.path.stem}.contacts.json")
+        legacy = config.data.get("owners")
+        if not isinstance(legacy, list):
+            return
+        existing = _read_json(contacts_path, {"version": 1, "contacts": []})
+        contacts = list(existing.get("contacts", [])) if isinstance(existing, dict) and isinstance(existing.get("contacts"), list) else []
+        known = {item.get("telegram_user_id") for item in contacts if isinstance(item, dict)}
+        for owner in legacy:
+            if not isinstance(owner, dict):
+                continue
+            if owner.get("user_id") in known:
+                continue
+            contacts.append({
+                "telegram_user_id": owner.get("user_id"), "username": owner.get("username"),
+                "display_name": owner.get("display_name"), "roles": ["owner"],
+                "added_at": owner.get("added_at", time.time()), "source": owner.get("source", "legacy"),
+            })
+        _write_json(contacts_path, {"version": 1, "contacts": contacts})
+        backup = config.path.with_suffix(config.path.suffix + ".owners.bak")
+        if not backup.exists():
+            shutil.copy2(config.path, backup)
+        config.data.pop("owners", None)
+        _write_json(config.path, config.data)
+
+    def _bot_state_file(self, bot_id: str, name: str) -> Path:
+        runtime = self.bots.get(bot_id)
+        if runtime and runtime.agent:
+            base = runtime.agent.paths.state_dir
+        elif runtime:
+            base = runtime.config.path.parent / "state"
+        else:
+            base = self.state_dir / bot_id
+        base.mkdir(parents=True, exist_ok=True)
+        return base / name
+
+    def _save_totp_pending(self, bot_id: str) -> None:
+        values = {key: value for key, value in self.totp_pending_deletions.items() if value.get("bot_id") == bot_id}
+        _write_json(self._bot_state_file(bot_id, "totp_cleanup.json"), values)
 
     def start(self) -> None:
         webhook_bots = [runtime for runtime in self.bots.values() if runtime.config.listener.get("mode") == "webhook"]
@@ -232,24 +333,32 @@ class TelegramManager:
         for runtime in self.bots.values():
             if runtime.config.listener.get("enabled", False):
                 runtime.start()
-                self._configure_totp_commands(runtime)
+                self._configure_owner_commands(runtime)
         self._restore_totp_deletions()
 
-    def _configure_totp_commands(self, runtime: BotRuntime) -> None:
-        """Reconcile the TOTP menu exclusively in each owner's private chat."""
-        if runtime.state != "running" or not runtime.config.data.get("totp", {}).get("enabled"):
+    def _configure_owner_commands(self, runtime: BotRuntime) -> None:
+        """Reconcile native commands exclusively in each owner's private chat."""
+        if runtime.state != "running":
             return
-        for owner in runtime.config.data.get("owners", []):
-            owner_id = owner.get("user_id") if isinstance(owner, dict) else None
+        for owner in self._owners(runtime):
+            owner_id = owner.get("telegram_user_id") if isinstance(owner, dict) else None
             if isinstance(owner_id, int):
                 try:
-                    runtime.set_owner_totp_command(owner_id)
+                    runtime.set_owner_commands(owner_id)
                 except TelegramApiError as exc:
-                    runtime.last_error = f"TOTP command configuration failed: {exc}"
+                    runtime.last_error = f"command configuration failed: {exc}"
+
+    def _configure_totp_commands(self, runtime: BotRuntime) -> None:
+        self._configure_owner_commands(runtime)
 
     def shutdown(self) -> None:
         for timer in self.totp_timers.values(): timer.cancel()
         self.totp_timers.clear()
+        for timer in self.config_timers.values(): timer.cancel()
+        self.config_timers.clear()
+        for runtime in self.bots.values():
+            if runtime.agent:
+                runtime.agent.close()
         for runtime in self.bots.values(): runtime.stop()
         if self.webhook: self.webhook.close()
         self.stop_event.set()
@@ -261,8 +370,12 @@ class TelegramManager:
         self.process_update(bot_id, update)
 
     @staticmethod
+    def _owners(runtime: BotRuntime) -> list[dict[str, Any]]:
+        return runtime.agent.contacts.owners() if runtime.agent else []
+
+    @staticmethod
     def _is_owner(runtime: BotRuntime, user_id: Any) -> bool:
-        return any(owner.get("user_id") == user_id for owner in runtime.config.data.get("owners", []))
+        return runtime.agent.contacts.is_owner(user_id) if runtime.agent else False
 
     @staticmethod
     def _totp_session_key(bot_id: str, user_id: Any, chat_id: Any) -> str:
@@ -273,7 +386,7 @@ class TelegramManager:
         key = f"{bot_id}:{chat_id}:{message_id}"
         with self.totp_cleanup_lock:
             if self.totp_pending_deletions.pop(key, None) is not None:
-                _write_json(self.totp_cleanup_file, self.totp_pending_deletions)
+                self._save_totp_pending(bot_id)
         try: self.bots[bot_id].delete(chat_id, message_id)
         except TelegramApiError: pass
 
@@ -286,7 +399,7 @@ class TelegramManager:
         with self.totp_cleanup_lock:
             self.totp_pending_deletions[key] = {"bot_id": bot_id, "chat_id": chat_id, "message_id": message_id,
                                                 "expires_at": expires_at}
-            _write_json(self.totp_cleanup_file, self.totp_pending_deletions)
+            self._save_totp_pending(bot_id)
         def delete() -> None:
             self.totp_timers.pop(key, None)
             self._delete_message(bot_id, chat_id, message_id)
@@ -304,7 +417,8 @@ class TelegramManager:
                 self.totp_pending_deletions.pop(key, None); continue
             self._schedule_delete(str(bot_id), chat_id, message_id, seconds)
         with self.totp_cleanup_lock:
-            _write_json(self.totp_cleanup_file, self.totp_pending_deletions)
+            for bot_id in self.bots:
+                self._save_totp_pending(bot_id)
 
     def _send_ephemeral(self, bot_id: str, chat_id: int | str, text: str, seconds: float,
                         reply_markup: dict[str, Any] | None = None, protect_content: bool = False) -> dict[str, Any]:
@@ -451,10 +565,158 @@ class TelegramManager:
         self._send_ephemeral(bot_id, chat["id"], code, lifetime, protect_content=False)
         self._send_ephemeral(bot_id, chat["id"], f"Expira em {remaining}s.", lifetime, protect_content=True)
 
+    @staticmethod
+    def _config_keyboard(token: str, settings: dict[str, bool], submenu: bool = False) -> tuple[str, dict[str, Any]]:
+        if not submenu:
+            return "Configurações do bot", {"inline_keyboard": [
+                [{"text": "Pensamentos", "callback_data": f"cfg:{token}:thoughts"}],
+                [{"text": "Fechar", "callback_data": f"cfg:{token}:close"}],
+            ]}
+        shared = "☑" if settings["share_thoughts"] else "☐"
+        deleted = "☑" if settings["delete_thoughts"] else "☐"
+        return "Configurações › Pensamentos", {"inline_keyboard": [
+            [{"text": f"{shared} Compartilha Pensamentos", "callback_data": f"cfg:{token}:share"}],
+            [{"text": f"{deleted} Excluir Pensamentos", "callback_data": f"cfg:{token}:delete"}],
+            [{"text": "‹ Voltar", "callback_data": f"cfg:{token}:back"}],
+            [{"text": "Fechar", "callback_data": f"cfg:{token}:close"}],
+        ]}
+
+    def _open_config(self, bot_id: str, chat_id: int | str, user_id: int) -> None:
+        runtime = self.bots[bot_id]
+        if not runtime.agent:
+            return
+        key = runtime.agent.store.key(chat_id)
+        token = secrets.token_urlsafe(12)
+        text, keyboard = self._config_keyboard(token, runtime.agent.store.settings(key))
+        sent = runtime.send(chat_id, text, reply_markup=keyboard, protect_content=True)
+        message_id = sent.get("message_id") if isinstance(sent, dict) else None
+        if not isinstance(message_id, int):
+            return
+        self.config_sessions[token] = {
+            "bot_id": bot_id, "chat_id": chat_id, "user_id": user_id,
+            "message_id": message_id, "expires_at": time.monotonic() + CONFIG_SESSION_SECONDS,
+        }
+        timer = threading.Timer(CONFIG_SESSION_SECONDS, self._close_config, args=(token,))
+        timer.daemon = True; self.config_timers[token] = timer; timer.start()
+
+    def _close_config(self, token: str) -> None:
+        session = self.config_sessions.pop(token, None)
+        timer = self.config_timers.pop(token, None)
+        if timer and threading.current_thread() is not timer:
+            timer.cancel()
+        if session:
+            self._delete_message(session["bot_id"], session["chat_id"], session["message_id"])
+
+    def _handle_config_callback(self, bot_id: str, callback: dict[str, Any]) -> bool:
+        data = str(callback.get("data") or "")
+        if not data.startswith("cfg:"):
+            return False
+        pieces = data.split(":")
+        if len(pieces) != 3:
+            return True
+        token, action = pieces[1], pieces[2]
+        session = self.config_sessions.get(token)
+        runtime = self.bots[bot_id]
+        sender = callback.get("from") or {}; message = callback.get("message") or {}; chat = message.get("chat") or {}
+        valid = bool(
+            session and session["bot_id"] == bot_id and session["chat_id"] == chat.get("id")
+            and session["user_id"] == sender.get("id") and session["expires_at"] >= time.monotonic()
+            and chat.get("type") == "private" and self._is_owner(runtime, sender.get("id"))
+        )
+        if not valid:
+            runtime.answer_callback(str(callback.get("id") or ""), "Esta configuração expirou.")
+            return True
+        if action == "close":
+            runtime.answer_callback(str(callback.get("id") or "")); self._close_config(token); return True
+        assert runtime.agent is not None
+        key = runtime.agent.store.key(chat.get("id"))
+        if action in {"share", "delete"}:
+            settings = runtime.agent.store.toggle_setting(key, "share_thoughts" if action == "share" else "delete_thoughts")
+            submenu = True
+        else:
+            settings = runtime.agent.store.settings(key)
+            submenu = action == "thoughts"
+        text, keyboard = self._config_keyboard(token, settings, submenu)
+        runtime.edit(chat["id"], session["message_id"], text, keyboard)
+        runtime.answer_callback(str(callback.get("id") or ""))
+        return True
+
+    @staticmethod
+    def _safe_filename(name: str, fallback: str) -> str:
+        value = re.sub(r"[^\w.() -]+", "_", Path(name).name, flags=re.UNICODE).strip(" .")
+        return (value or fallback)[:180]
+
+    def _agent_payload(self, runtime: BotRuntime, message: dict[str, Any]) -> dict[str, Any]:
+        assert runtime.agent is not None
+        payload: dict[str, Any] = {
+            "text": message.get("text"), "caption": message.get("caption"), "attachments": [],
+            "telegram_message_id": message.get("message_id"),
+        }
+        agent_config = runtime.config.data.get("agent") or {}
+        maximum = int(agent_config.get("max_attachment_bytes", 20 * 1024 * 1024))
+        batch_maximum = int(agent_config.get("max_batch_attachment_bytes", 50 * 1024 * 1024))
+        directory = runtime.agent.paths.staging_dir / f"{message.get('chat', {}).get('id')}-{message.get('message_id', int(time.time()))}"
+        total = 0
+        photos = message.get("photo")
+        if isinstance(photos, list) and photos:
+            photo = photos[-1]
+            file_id = photo.get("file_id") if isinstance(photo, dict) else None
+            if file_id:
+                size = int(photo.get("file_size") or 0)
+                total += size
+                if total > batch_maximum: raise TelegramApiError("attachment batch exceeds configured limit")
+                path = directory / f"photo-{message.get('message_id', 'image')}.jpg"
+                runtime.download(file_id, path, maximum)
+                size = path.stat().st_size
+                total = total - int(photo.get("file_size") or 0) + size
+                if total > batch_maximum:
+                    path.unlink(missing_ok=True)
+                    raise TelegramApiError("attachment batch exceeds configured limit")
+                payload["attachments"].append({"kind": "image", "path": str(path), "name": path.name, "size": size})
+        document = message.get("document")
+        if isinstance(document, dict) and document.get("file_id"):
+            size = int(document.get("file_size") or 0)
+            total += size
+            if total > batch_maximum: raise TelegramApiError("attachment batch exceeds configured limit")
+            name = self._safe_filename(str(document.get("file_name") or "document.bin"), "document.bin")
+            path = directory / name
+            runtime.download(document["file_id"], path, maximum)
+            actual_size = path.stat().st_size
+            if total - size + actual_size > batch_maximum:
+                path.unlink(missing_ok=True)
+                raise TelegramApiError("attachment batch exceeds configured limit")
+            payload["attachments"].append({"kind": "document", "path": str(path), "name": name,
+                                            "mime_type": document.get("mime_type"), "size": actual_size})
+        voice = message.get("voice")
+        settings = voice_transcription_settings(runtime.config.data)
+        if isinstance(voice, dict) and settings is not None and voice.get("file_id"):
+            size = int(voice.get("file_size") or 0)
+            limit = min(maximum, settings.max_audio_bytes)
+            total += size
+            if size > limit or total > batch_maximum:
+                raise TelegramApiError("voice message exceeds configured limit")
+            path = directory / f"voice-{message.get('message_id', 'audio')}.ogg"
+            runtime.download(str(voice["file_id"]), path, limit)
+            actual_size = path.stat().st_size
+            if total - size + actual_size > batch_maximum:
+                path.unlink(missing_ok=True)
+                raise TelegramApiError("attachment batch exceeds configured limit")
+            payload["attachments"].append({
+                "kind": "voice", "path": str(path), "name": path.name, "mime_type": voice.get("mime_type") or "audio/ogg",
+                "size": actual_size, "duration_seconds": int(voice.get("duration") or 0),
+            })
+        return payload
+
     def process_update(self, bot_id: str, update: dict[str, Any]) -> None:
         runtime = self.bots[bot_id]
+        if runtime.agent and not runtime.agent.store.accept_update(update.get("update_id")):
+            return
         callback = update.get("callback_query")
         if isinstance(callback, dict):
+            if self._handle_config_callback(bot_id, callback):
+                return
+            if runtime.agent and runtime.agent.handle_callback(callback):
+                return
             self._handle_totp_callback(bot_id, callback)
             return
         message = update.get("message") or update.get("edited_message")
@@ -471,6 +733,19 @@ class TelegramManager:
         if totp_command:
             if private_owner and totp_enabled:
                 self._start_totp(bot_id, sender, chat, message, (totp_command.group(1) or "").strip())
+            return
+        if private_owner and NEW_COMMAND_RE.match(text):
+            if session:
+                self._clear_totp_session(session_key)
+            if runtime.agent and runtime.agent.enabled:
+                runtime.agent.reset_conversation(chat.get("id"), message.get("message_thread_id"))
+                runtime.send(chat.get("id"), "Nova conversa iniciada.")
+            return
+        if private_owner and CONFIG_COMMAND_RE.match(text):
+            if session:
+                self._clear_totp_session(session_key)
+            if runtime.agent and runtime.agent.enabled:
+                self._open_config(bot_id, chat.get("id"), sender.get("id"))
             return
         if session and private_owner:
             if session.get("expires_at", 0) < time.monotonic():
@@ -489,66 +764,120 @@ class TelegramManager:
             response = self._pair(bot_id, sender, (pair_command.group(1) or "").strip())
         elif not self._has_owners(runtime):
             response = "Este bot ainda não tem proprietário. Envie /pair [PIN DE CONFIGURAÇÃO] para concluir o pareamento."
+        elif runtime.agent and runtime.agent.enabled:
+            if not private_owner:
+                return
+            voice_enabled = voice_transcription_settings(runtime.config.data) is not None
+            if not text and not message.get("caption") and not message.get("photo") and not message.get("document") and not (voice_enabled and message.get("voice")):
+                runtime.send(chat.get("id"), "Este tipo de mensagem ainda não é suportado.")
+                return
+            try:
+                with self._typing(bot_id, chat.get("id")):
+                    payload = self._agent_payload(runtime, message)
+            except TelegramApiError:
+                runtime.send(chat.get("id"), "Não foi possível receber o anexo ou ele excede o limite permitido.")
+                return
+            runtime.agent.enqueue(update.get("update_id"), message, payload, update_already_accepted=True)
+            return
         else:
             response = runtime.config.data.get("reply_text", DEFAULT_REPLY)
         runtime.send(chat.get("id"), response, message.get("message_thread_id"))
 
-    @staticmethod
-    def _has_owners(runtime: BotRuntime) -> bool:
-        return bool(runtime.config.data.get("owners", []))
+    def _has_owners(self, runtime: BotRuntime) -> bool:
+        return bool(self._owners(runtime))
 
     def _pair(self, bot_id: str, sender: dict[str, Any], pin: str) -> str:
-        pairing = _read_json(self.pairing_file, {})
-        record = pairing.get(bot_id)
+        pairing_file = self._bot_state_file(bot_id, "pairing.json")
+        record = _read_json(pairing_file, None)
         digest = hashlib.sha256(f"{bot_id}:{pin}".encode()).hexdigest()
         if not record:
             return "Não há um pairing ativo para este bot. Solicite um novo PIN de configuração."
         if record.get("expires_at", 0) < time.time():
-            pairing.pop(bot_id, None)
-            _write_json(self.pairing_file, pairing)
+            pairing_file.unlink(missing_ok=True)
             return "O PIN de pairing expirou. Solicite um novo PIN de configuração."
         if not secrets.compare_digest(record.get("hash", ""), digest):
             attempts = int(record.get("attempts", 0)) + 1
             if attempts >= MAX_PAIR_ATTEMPTS:
-                pairing.pop(bot_id, None)
-                _write_json(self.pairing_file, pairing)
+                pairing_file.unlink(missing_ok=True)
                 return "Pairing cancelado por excesso de tentativas com PIN incorreto. Solicite um novo PIN."
             record["attempts"] = attempts
-            pairing[bot_id] = record
-            _write_json(self.pairing_file, pairing)
+            _write_json(pairing_file, record)
             remaining = MAX_PAIR_ATTEMPTS - attempts
             suffix = "tentativa" if remaining == 1 else "tentativas"
             return f"PIN incorreto. Você ainda tem {remaining} {suffix}."
-        config = self.bots[bot_id].config
-        owners = config.data.setdefault("owners", [])
-        if not any(owner.get("user_id") == sender.get("id") for owner in owners):
-            owners.append({"user_id": sender.get("id"), "username": sender.get("username"), "display_name": sender.get("first_name"), "added_at": time.time(), "source": "pair"})
-            _write_json(config.path, config.data)
-        self._configure_totp_commands(self.bots[bot_id])
-        pairing.pop(bot_id, None); _write_json(self.pairing_file, pairing)
+        runtime = self.bots[bot_id]
+        if not runtime.agent:
+            raise AgentConfigurationError("bot contacts are unavailable")
+        runtime.agent.contacts.add_owner(sender)
+        self._configure_owner_commands(runtime)
+        pairing_file.unlink(missing_ok=True)
         return "Pairing concluído com sucesso. Sua conta agora é owner deste bot."
 
     def pair_request(self, bot_id: str, ttl_seconds: int = 300) -> dict[str, Any]:
         if bot_id not in self.bots: raise ValueError("bot not found")
         ttl_seconds = max(1, min(int(ttl_seconds), MAX_PAIR_TTL_SECONDS))
         pin = f"{secrets.randbelow(1_000_000):06d}"
-        pairing = _read_json(self.pairing_file, {})
-        pairing[bot_id] = {"hash": hashlib.sha256(f"{bot_id}:{pin}".encode()).hexdigest(), "expires_at": time.time() + ttl_seconds, "attempts": 0}
-        _write_json(self.pairing_file, pairing)
+        pairing_file = self._bot_state_file(bot_id, "pairing.json")
+        _write_json(pairing_file, {"hash": hashlib.sha256(f"{bot_id}:{pin}".encode()).hexdigest(), "expires_at": time.time() + ttl_seconds, "attempts": 0})
         return {"bot_id": bot_id, "pin": pin, "expires_in": ttl_seconds}
+
+    def migrate_bots(self, apply: bool = False) -> dict[str, Any]:
+        operations: list[dict[str, str]] = []
+        for source in sorted(self.legacy_bots_dir.glob("*.json")):
+            data = _read_json(source, {})
+            if not isinstance(data, dict) or not data.get("id"):
+                continue
+            bot_id = str(data["id"])
+            target_dir = self.bots_dir / bot_id
+            target = target_dir / "bot.json"
+            if target.exists():
+                continue
+            operation = {"bot_id": bot_id, "source": str(source), "target": str(target)}
+            operations.append(operation)
+            if not apply:
+                continue
+            target_dir.mkdir(parents=True, exist_ok=True)
+            backup = source.with_suffix(source.suffix + ".migration.bak")
+            if not backup.exists():
+                shutil.copy2(source, backup)
+            shutil.copy2(source, target)
+            legacy_contacts = source.with_name(f"{source.stem}.contacts.json")
+            if legacy_contacts.exists():
+                shutil.copy2(legacy_contacts, target_dir / "contacts.json")
+            else:
+                write_json(target_dir / "contacts.json", {"version": 1, "contacts": []})
+            source.rename(source.with_suffix(source.suffix + ".migrated"))
+        return {"applied": apply, "operations": operations}
 
     def handle(self, method: str, params: dict[str, Any]) -> Any:
         if method == "ping": return {"service": "telegram-manager", "state": "running", "bots": len(self.bots)}
         if method == "telegram.bots": return [runtime.status() for runtime in self.bots.values()]
         bot_id = params.get("bot_id")
         if method == "telegram.bot.pair-request": return self.pair_request(bot_id, int(params.get("ttl_seconds", 300)))
-        if method == "telegram.bot.owners": return self.bots[bot_id].config.data.get("owners", [])
+        if method == "telegram.bot.owners": return self._owners(self.bots[bot_id])
         if method == "telegram.bot.start-listener": return self.bots[bot_id].start()
         if method == "telegram.bot.stop-listener": return self.bots[bot_id].stop()
         if method == "telegram.bot.status": return self.bots[bot_id].status()
+        if method == "telegram.bot.agent-init": return self.bots[bot_id].agent.init()
+        if method == "telegram.bot.agent-sync": return self.bots[bot_id].agent.sync()
+        if method == "telegram.bot.agent-status":
+            agent = self.bots[bot_id].agent
+            return {**agent.status(), "login": agent.login_status() if agent.enabled else None}
+        if method == "telegram.bot.agent-validate": return self.bots[bot_id].agent.validate(bool(params.get("require_login", False)))
+        if method in {"telegram.bot.agent-spec", "telegram.bot.agent-login-prepare"}:
+            agent = self.bots[bot_id].agent
+            was_running = agent.suspend() if method.endswith("login-prepare") else False
+            return {"executable": str(agent._executable()), "codex_home": str(agent.paths.codex_home) if agent.paths.codex_home else None,
+                    "working_directory": str(agent.paths.working_directory), "environment": agent.environment(), "was_running": was_running}
+        if method == "telegram.bot.agent-login-finish":
+            agent = self.bots[bot_id].agent
+            return agent.start() if params.get("restart") and self.bots[bot_id].state == "running" else agent.status()
+        if method == "telegram.migrate-bots": return self.migrate_bots(bool(params.get("apply", False)))
         if method == "telegram.send":
             return self.bots[bot_id].send(params["chat_id"], params["text"], params.get("message_thread_id"))
-        if method == "shutdown": self.shutdown(); return {"state": "stopping"}
+        if method == "shutdown":
+            self.stop_event.set()
+            return {"state": "stopping"}
         raise ValueError(f"unknown method: {method}")
 
 
