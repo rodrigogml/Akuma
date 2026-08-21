@@ -36,3 +36,7 @@
 	path = .agents/skills/integrations/aws
 	url = git@github.com:rodrigogml/skillAWS.git
 	branch = main
+[submodule ".agents/skills/integrations/eccovox"]
+	path = .agents/skills/integrations/eccovox
+	url = git@github.com:rodrigogml/skillEccoVox.git
+	branch = main
